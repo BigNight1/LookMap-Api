@@ -34,6 +34,13 @@ export interface UserEntity {
   color: string;
   /** Marker pin size on the map UI (matches UserSchema default). */
   pinSize: string;
+  /** Default true — nombre visible en el pin (legacy / actual UX). */
+  mapPinsImageOnly: boolean;
+  /** Email verified (or Google account). Not exposed with codes in PublicUser. */
+  isVerified: boolean;
+  /** Present only when loaded for verification flows */
+  verificationCode?: string | null;
+  verificationCodeExpires?: Date | null;
   /**
    * IDs of all groups the user belongs to.
    * Free plan: max 2. Empty array means not in any group.
@@ -48,5 +55,8 @@ export interface UserEntity {
   createdAt: Date;
 }
 
-/** Safe projection: user without the password field */
-export type PublicUser = Omit<UserEntity, 'password'>;
+/** Safe projection: user without secrets or verification codes */
+export type PublicUser = Omit<
+  UserEntity,
+  'password' | 'verificationCode' | 'verificationCodeExpires'
+>;

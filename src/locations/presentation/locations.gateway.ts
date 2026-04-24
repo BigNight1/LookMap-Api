@@ -59,7 +59,15 @@ export class LocationsGateway
   @WebSocketServer() server: Server;
 
   private readonly logger = new Logger(LocationsGateway.name);
-  private readonly connectedUsers = new Set<string>();
+  /** Connection count per userId — supports multiple tabs/devices */
+  private readonly connectedUsers = new Map<string, number>();
+  private readonly avatarCache = new Map<
+    string,
+    { data: Map<string, string | null>; expires: number }
+  >();
+  private readonly AVATAR_CACHE_TTL_MS = 5 * 60 * 1000;
+  private readonly messageSendTimestamps = new Map<string, number>();
+  private readonly MESSAGE_THROTTLE_MS = 500;
 
   constructor(
     private readonly locationUseCase: LocationUseCase,
@@ -137,7 +145,10 @@ export class LocationsGateway
         groupIds: joinedGroupIds,
       };
 
-      this.connectedUsers.add(user.id);
+      this.connectedUsers.set(
+        user.id,
+        (this.connectedUsers.get(user.id) ?? 0) + 1,
+      );
       await this.authRepo.setOnlineStatus(user.id, true);
       client.emit('connected', { userId: user.id, groupIds: joinedGroupIds });
       this.logger.log(`Client connected: ${user.nickname} — rooms: [${joinedGroupIds.join(', ')}]`);
@@ -151,6 +162,12 @@ export class LocationsGateway
     const { userId, nickname, groupIds } = client.data as SocketData;
     if (!userId) return;
 
+    const prev = this.connectedUsers.get(userId) ?? 0;
+    const count = prev - 1;
+    if (count > 0) {
+      this.connectedUsers.set(userId, count);
+      return;
+    }
     this.connectedUsers.delete(userId);
 
     try {
@@ -189,34 +206,40 @@ export class LocationsGateway
     @ConnectedSocket() client: Socket,
     @MessageBody() payload: { groupId: string },
   ) {
-    const data = client.data as SocketData;
-    if (!data?.userId) return;
+    try {
+      const data = client.data as SocketData;
+      if (!data?.userId) return;
 
-    const { groupId } = payload;
+      const { groupId } = payload;
 
-    // Validate the user actually belongs to this group
-    const user = await this.authRepo.findById(data.userId);
-    if (!user || !user.groupIds.includes(groupId)) {
-      client.emit('error', { message: 'You are not a member of this group' });
-      return;
+      // Validate the user actually belongs to this group
+      const user = await this.authRepo.findById(data.userId);
+      if (!user || !user.groupIds.includes(groupId)) {
+        client.emit('error', { message: 'You are not a member of this group' });
+        return;
+      }
+
+      // Avoid double-joining
+      if (!data.groupIds.includes(groupId)) {
+        await client.join(`group:${groupId}`);
+        (client.data as SocketData).groupIds = [...data.groupIds, groupId];
+      }
+
+      const groupLocations = await this.locationUseCase.getGroupState(groupId);
+      const ids = [...new Set(groupLocations.map((loc) => loc.userId))];
+      const memberAvatars = await this.getCachedAvatarMap(groupId, ids);
+      const enriched = groupLocations.map((loc) => ({
+        ...loc,
+        isOnline: (this.connectedUsers.get(loc.userId) ?? 0) > 0,
+        avatar: memberAvatars.get(loc.userId) ?? null,
+      }));
+      client.emit('group:location:update', enriched);
+
+      this.logger.log(`${data.nickname} joined room group:${groupId}`);
+    } catch (err) {
+      this.logger.error('Error in join:group:', err);
+      client.emit('error', { message: 'Internal error' });
     }
-
-    // Avoid double-joining
-    if (!data.groupIds.includes(groupId)) {
-      await client.join(`group:${groupId}`);
-      (client.data as SocketData).groupIds = [...data.groupIds, groupId];
-    }
-
-    const groupLocations = await this.locationUseCase.getGroupState(groupId);
-    const memberAvatars = await this.buildMemberAvatarMap(groupLocations);
-    const enriched = groupLocations.map((loc) => ({
-      ...loc,
-      isOnline: this.connectedUsers.has(loc.userId),
-      avatar: memberAvatars.get(loc.userId) ?? null,
-    }));
-    client.emit('group:location:update', enriched);
-
-    this.logger.log(`${data.nickname} joined room group:${groupId}`);
   }
 
   /**
@@ -243,10 +266,11 @@ export class LocationsGateway
         battery: payload.battery ?? 100,
       });
 
-      const memberAvatars = await this.buildMemberAvatarMap(groupLocations);
+      const ids = [...new Set(groupLocations.map((loc) => loc.userId))];
+      const memberAvatars = await this.getCachedAvatarMap(groupId, ids);
       const enriched = groupLocations.map((loc) => ({
         ...loc,
-        isOnline: this.connectedUsers.has(loc.userId),
+        isOnline: (this.connectedUsers.get(loc.userId) ?? 0) > 0,
         avatar: memberAvatars.get(loc.userId) ?? null,
       }));
 
@@ -302,16 +326,30 @@ export class LocationsGateway
     this.logger.log(`${data.nickname} route:update → group:${groupId}`);
   }
 
-  private async buildMemberAvatarMap(
-    groupLocations: { userId: string }[],
+  private async getCachedAvatarMap(
+    groupId: string,
+    userIds: string[],
   ): Promise<Map<string, string | null>> {
-    const memberAvatars = new Map<string, string | null>();
-    const ids = [...new Set(groupLocations.map((loc) => loc.userId))];
-    const groupUsers = await this.authRepo.findUsersByIds(ids);
-    for (const u of groupUsers) {
-      memberAvatars.set(u.id, u.avatar ?? null);
+    const unique = [...new Set(userIds)];
+    const cached = this.avatarCache.get(groupId);
+    if (cached && cached.expires > Date.now()) {
+      return cached.data;
     }
-    return memberAvatars;
+    const users = await this.authRepo.findUsersByIds(unique);
+    const data = new Map<string, string | null>();
+    for (const u of users) {
+      data.set(u.id, u.avatar ?? null);
+    }
+    this.avatarCache.set(groupId, {
+      data,
+      expires: Date.now() + this.AVATAR_CACHE_TTL_MS,
+    });
+    return data;
+  }
+
+  /** Called when a user updates their avatar so the next location broadcast refetches DB */
+  invalidateAvatarCache(groupId: string): void {
+    this.avatarCache.delete(groupId);
   }
 
   private findSocketByUserId(userId: string): Socket | undefined {
@@ -328,91 +366,22 @@ export class LocationsGateway
     @ConnectedSocket() client: Socket,
     @MessageBody() payload: DestinationInvitePayload,
   ) {
-    const data = client.data as SocketData;
-    if (!data?.userId) return;
+    try {
+      const data = client.data as SocketData;
+      if (!data?.userId) return;
 
-    const { groupId, destCoords, destName, targetUserIds } = payload;
-    if (!groupId || typeof groupId !== 'string') {
-      client.emit('error', { message: 'Invalid groupId' });
-      return;
-    }
-
-    if (!data.groupIds?.includes(groupId)) {
-      client.emit('error', { message: 'You are not a member of this group' });
-      return;
-    }
-
-    const { latitude, longitude } = destCoords ?? {};
-    if (
-      typeof latitude !== 'number' ||
-      typeof longitude !== 'number' ||
-      !Number.isFinite(latitude) ||
-      !Number.isFinite(longitude)
-    ) {
-      client.emit('error', { message: 'Invalid destCoords' });
-      return;
-    }
-
-    if (typeof destName !== 'string') {
-      client.emit('error', { message: 'Invalid destName' });
-      return;
-    }
-
-    if (!Array.isArray(targetUserIds)) {
-      client.emit('error', { message: 'Invalid targetUserIds' });
-      return;
-    }
-
-    const expiresAt = Date.now() + 5 * 60 * 1000;
-    const inviteBody = {
-      fromUserId: data.userId,
-      fromNickname: data.nickname,
-      groupId,
-      destCoords: { latitude, longitude },
-      destName,
-      expiresAt,
-    };
-
-    for (const targetUserId of targetUserIds) {
-      if (typeof targetUserId !== 'string') continue;
-      const targetSocket = this.findSocketByUserId(targetUserId);
-      targetSocket?.emit('destination:invite', inviteBody);
-    }
-
-    this.logger.log(`destination:invite ${data.nickname} group:${groupId}`);
-  }
-
-  @SubscribeMessage('destination:response')
-  handleDestinationResponse(
-    @ConnectedSocket() client: Socket,
-    @MessageBody() payload: DestinationResponsePayload,
-  ) {
-    const data = client.data as SocketData;
-    if (!data?.userId) return;
-
-    const { groupId, fromUserId, accepted } = payload;
-    if (!groupId || typeof groupId !== 'string') {
-      client.emit('error', { message: 'Invalid groupId' });
-      return;
-    }
-
-    if (!data.groupIds?.includes(groupId)) {
-      client.emit('error', { message: 'You are not a member of this group' });
-      return;
-    }
-
-    if (!fromUserId || typeof fromUserId !== 'string') {
-      client.emit('error', { message: 'Invalid fromUserId' });
-      return;
-    }
-
-    if (accepted) {
-      const dc = payload.destCoords;
-      if (!dc) {
-        client.emit('error', { message: 'destCoords required when accepted' });
+      const { groupId, destCoords, destName, targetUserIds } = payload;
+      if (!groupId || typeof groupId !== 'string') {
+        client.emit('error', { message: 'Invalid groupId' });
         return;
       }
-      const { latitude, longitude } = dc;
+
+      if (!data.groupIds?.includes(groupId)) {
+        client.emit('error', { message: 'You are not a member of this group' });
+        return;
+      }
+
+      const { latitude, longitude } = destCoords ?? {};
       if (
         typeof latitude !== 'number' ||
         typeof longitude !== 'number' ||
@@ -423,20 +392,99 @@ export class LocationsGateway
         return;
       }
 
-      this.server.to(`group:${groupId}`).emit('destination:accepted', {
-        userId: data.userId,
+      if (typeof destName !== 'string') {
+        client.emit('error', { message: 'Invalid destName' });
+        return;
+      }
+
+      if (!Array.isArray(targetUserIds)) {
+        client.emit('error', { message: 'Invalid targetUserIds' });
+        return;
+      }
+
+      const expiresAt = Date.now() + 5 * 60 * 1000;
+      const inviteBody = {
+        fromUserId: data.userId,
+        fromNickname: data.nickname,
         groupId,
         destCoords: { latitude, longitude },
-      });
-    } else {
-      const fromSocket = this.findSocketByUserId(fromUserId);
-      fromSocket?.emit('destination:rejected', {
-        userId: data.userId,
-        groupId,
-      });
-    }
+        destName,
+        expiresAt,
+      };
 
-    this.logger.log(`destination:response ${data.nickname} group:${groupId} accepted:${accepted}`);
+      for (const targetUserId of targetUserIds) {
+        if (typeof targetUserId !== 'string') continue;
+        const targetSocket = this.findSocketByUserId(targetUserId);
+        targetSocket?.emit('destination:invite', inviteBody);
+      }
+
+      this.logger.log(`destination:invite ${data.nickname} group:${groupId}`);
+    } catch (err) {
+      this.logger.error('Error in destination:invite:', err);
+      client.emit('error', { message: 'Internal error' });
+    }
+  }
+
+  @SubscribeMessage('destination:response')
+  handleDestinationResponse(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() payload: DestinationResponsePayload,
+  ) {
+    try {
+      const data = client.data as SocketData;
+      if (!data?.userId) return;
+
+      const { groupId, fromUserId, accepted } = payload;
+      if (!groupId || typeof groupId !== 'string') {
+        client.emit('error', { message: 'Invalid groupId' });
+        return;
+      }
+
+      if (!data.groupIds?.includes(groupId)) {
+        client.emit('error', { message: 'You are not a member of this group' });
+        return;
+      }
+
+      if (!fromUserId || typeof fromUserId !== 'string') {
+        client.emit('error', { message: 'Invalid fromUserId' });
+        return;
+      }
+
+      if (accepted) {
+        const dc = payload.destCoords;
+        if (!dc) {
+          client.emit('error', { message: 'destCoords required when accepted' });
+          return;
+        }
+        const { latitude, longitude } = dc;
+        if (
+          typeof latitude !== 'number' ||
+          typeof longitude !== 'number' ||
+          !Number.isFinite(latitude) ||
+          !Number.isFinite(longitude)
+        ) {
+          client.emit('error', { message: 'Invalid destCoords' });
+          return;
+        }
+
+        this.server.to(`group:${groupId}`).emit('destination:accepted', {
+          userId: data.userId,
+          groupId,
+          destCoords: { latitude, longitude },
+        });
+      } else {
+        const fromSocket = this.findSocketByUserId(fromUserId);
+        fromSocket?.emit('destination:rejected', {
+          userId: data.userId,
+          groupId,
+        });
+      }
+
+      this.logger.log(`destination:response ${data.nickname} group:${groupId} accepted:${accepted}`);
+    } catch (err) {
+      this.logger.error('Error in destination:response:', err);
+      client.emit('error', { message: 'Internal error' });
+    }
   }
 
   @SubscribeMessage('message:send')
@@ -444,46 +492,58 @@ export class LocationsGateway
     @ConnectedSocket() client: Socket,
     @MessageBody() payload: { groupId: string; text: string },
   ) {
-    const data = client.data as SocketData;
-    if (!data?.userId) return;
+    try {
+      const data = client.data as SocketData;
+      if (!data?.userId) return;
 
-    const { groupId, text } = payload ?? {};
-    if (!groupId || typeof groupId !== 'string') {
-      client.emit('error', { message: 'Invalid groupId' });
-      return;
+      const { groupId, text } = payload ?? {};
+      if (!groupId || typeof groupId !== 'string') {
+        client.emit('error', { message: 'Invalid groupId' });
+        return;
+      }
+
+      if (!data.groupIds?.includes(groupId)) {
+        client.emit('error', { message: 'You are not a member of this group' });
+        return;
+      }
+
+      const lastSent = this.messageSendTimestamps.get(data.userId) ?? 0;
+      if (Date.now() - lastSent < this.MESSAGE_THROTTLE_MS) {
+        client.emit('error', { message: 'Too many messages' });
+        return;
+      }
+      this.messageSendTimestamps.set(data.userId, Date.now());
+
+      const trimmed = typeof text === 'string' ? text.trim() : '';
+      if (!trimmed || trimmed.length > 500) {
+        client.emit('error', { message: 'Invalid text' });
+        return;
+      }
+
+      const msg = await this.messageUseCase.create({
+        groupId,
+        userId: data.userId,
+        userName: data.nickname,
+        userColor: data.color,
+        text: trimmed,
+      });
+
+      this.server.to(`group:${groupId}`).emit('group:message:new', {
+        id: msg.id,
+        groupId: msg.groupId,
+        userId: msg.userId,
+        userName: msg.userName,
+        userColor: msg.userColor,
+        userAvatar: data.avatar ?? null,
+        text: msg.text,
+        createdAt: msg.createdAt,
+      });
+
+      this.logger.log(`message:send ${data.nickname} group:${groupId}`);
+    } catch (err) {
+      this.logger.error('Error in message:send:', err);
+      client.emit('error', { message: 'Internal error' });
     }
-
-    if (!data.groupIds?.includes(groupId)) {
-      client.emit('error', { message: 'You are not a member of this group' });
-      return;
-    }
-
-    const trimmed = typeof text === 'string' ? text.trim() : '';
-    if (!trimmed || trimmed.length > 500) {
-      client.emit('error', { message: 'Invalid text' });
-      return;
-    }
-
-    const msg = await this.messageUseCase.create({
-      groupId,
-      userId: data.userId,
-      userName: data.nickname,
-      userColor: data.color,
-      text: trimmed,
-    });
-
-    this.server.to(`group:${groupId}`).emit('group:message:new', {
-      id: msg.id,
-      groupId: msg.groupId,
-      userId: msg.userId,
-      userName: msg.userName,
-      userColor: msg.userColor,
-      userAvatar: data.avatar ?? null,
-      text: msg.text,
-      createdAt: msg.createdAt,
-    });
-
-    this.logger.log(`message:send ${data.nickname} group:${groupId}`);
   }
 
   /**

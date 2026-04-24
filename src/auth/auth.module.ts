@@ -6,6 +6,7 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 
 import { UserSchema, UserSchemaDefinition } from './infrastructure/user.schema';
 import { AuthRepository } from './infrastructure/auth.repository';
+import { EmailService } from './infrastructure/email.service';
 import { JwtStrategy } from './infrastructure/jwt.strategy';
 import { LocationsGateway } from '../locations/presentation/locations.gateway';
 import { LocationsModule } from '../locations/locations.module';
@@ -35,15 +36,17 @@ import { AuthController } from './presentation/auth.controller';
   controllers: [AuthController],
   providers: [
     AuthRepository,
+    EmailService,
     JwtStrategy,
     {
       provide: AuthUseCase,
       useFactory: (
         repo: AuthRepository,
         config: ConfigService,
+        emailService: EmailService,
         locationsGateway: LocationsGateway,
-      ) => new AuthUseCase(repo, config, locationsGateway),
-      inject: [AuthRepository, ConfigService, LocationsGateway],
+      ) => new AuthUseCase(repo, config, emailService, locationsGateway),
+      inject: [AuthRepository, ConfigService, EmailService, LocationsGateway],
     },
   ],
   exports: [JwtModule, AuthRepository],

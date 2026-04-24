@@ -9,6 +9,14 @@ export interface GroupMember {
   joinedAt: Date;
   /** Present when loaded via user lookup (e.g. findManyById); not stored on group documents */
   avatar?: string | null;
+  /** Real-time presence snapshot for `/groups/mine` hydration. */
+  isOnline?: boolean;
+  /** Current location when online; null when offline or unknown. */
+  location?: { latitude: number; longitude: number; timestamp: string } | null;
+  /** Last persisted known location (used to render offline members). */
+  lastKnownLocation?: { latitude: number; longitude: number; timestamp: string } | null;
+  /** Last seen timestamp for offline members. */
+  lastSeenAt?: string | null;
 }
 
 export interface GroupEntity {

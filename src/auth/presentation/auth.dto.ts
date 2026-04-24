@@ -12,6 +12,7 @@ import {
   ValidateIf,
   IsIn,
   IsUrl,
+  IsBoolean,
 } from 'class-validator';
 
 export class RegisterDto {
@@ -44,6 +45,23 @@ export class LoginDto {
   @IsString()
   @MinLength(6)
   password: string;
+}
+
+export class VerifyEmailDto {
+  @IsEmail()
+  email: string;
+
+  @IsString()
+  @IsNotEmpty()
+  @MinLength(6)
+  @MaxLength(6)
+  @Matches(/^\d{6}$/, { message: 'code must be 6 digits' })
+  code: string;
+}
+
+export class ResendVerificationDto {
+  @IsEmail()
+  email: string;
 }
 
 export class GoogleAuthDto {
@@ -86,6 +104,10 @@ export class UpdateProfileDto {
   @IsString()
   @IsIn(['min', 'small', 'normal', 'large', 'max'])
   pinSize?: string;
+
+  @IsOptional()
+  @IsBoolean()
+  mapPinsImageOnly?: boolean;
 }
 
 /** Persisted navigation for a group (same shape as socket `route:update` + dest name). */

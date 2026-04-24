@@ -2,6 +2,7 @@ import * as bcrypt from 'bcrypt';
 import { ConfigService } from '@nestjs/config';
 import { OAuth2Client } from 'google-auth-library';
 import { v2 as cloudinary } from 'cloudinary';
+import { EmailService } from '../infrastructure/email.service';
 import { LocationsGateway } from '../../locations/presentation/locations.gateway';
 import { IAuthRepository, SetActiveRouteInput } from './IAuthRepository';
 import { PublicUser, UserEntity } from './entities/user.entity';
@@ -22,8 +23,15 @@ function randomColor(): string {
 }
 
 function toPublicUser(user: UserEntity): PublicUser {
-  const { password, ...rest } = user;
+  const {
+    password,
+    verificationCode,
+    verificationCodeExpires,
+    ...rest
+  } = user;
   void password;
+  void verificationCode;
+  void verificationCodeExpires;
   return rest;
 }
 
@@ -59,10 +67,11 @@ export class AuthUseCase {
   constructor(
     private readonly authRepo: IAuthRepository,
     private readonly config: ConfigService,
+    private readonly emailService: EmailService,
     private readonly locationsGateway?: LocationsGateway,
   ) {}
 
-  async register(input: RegisterInput): Promise<AuthResult> {
+  async register(input: RegisterInput): Promise<{ message: string }> {
     const emailTaken = await this.authRepo.findByEmail(input.email);
     if (emailTaken) throw new Error('EMAIL_ALREADY_EXISTS');
 
@@ -70,16 +79,59 @@ export class AuthUseCase {
     if (nicknameTaken) throw new Error('NICKNAME_ALREADY_EXISTS');
 
     const hashed = await bcrypt.hash(input.password, 10);
+    const code = Math.floor(100000 + Math.random() * 900000).toString();
+    const expires = new Date(Date.now() + 15 * 60 * 1000);
 
-    const created = await this.authRepo.create({
+    await this.authRepo.create({
       name: input.name,
       email: input.email.toLowerCase(),
       nickname: input.nickname,
       password: hashed,
       color: randomColor(),
+      isVerified: false,
+      verificationCode: code,
+      verificationCodeExpires: expires,
     });
 
-    return { user: toPublicUser(created), userId: created.id };
+    await this.emailService.sendVerificationCode(
+      input.email.toLowerCase(),
+      input.name,
+      code,
+    );
+    return { message: 'VERIFICATION_REQUIRED' };
+  }
+
+  async verifyEmail(email: string, code: string): Promise<AuthResult> {
+    const user = await this.authRepo.findByEmailWithVerification(
+      email.toLowerCase(),
+    );
+    if (!user) throw new Error('USER_NOT_FOUND');
+    if (user.isVerified) throw new Error('ALREADY_VERIFIED');
+    if (!user.verificationCode || user.verificationCode !== code) {
+      throw new Error('INVALID_CODE');
+    }
+    if (
+      !user.verificationCodeExpires ||
+      user.verificationCodeExpires < new Date()
+    ) {
+      throw new Error('CODE_EXPIRED');
+    }
+
+    const updated = await this.authRepo.markAsVerified(user.id);
+    return { user: toPublicUser(updated), userId: updated.id };
+  }
+
+  async resendVerificationCode(email: string): Promise<void> {
+    const user = await this.authRepo.findByEmailWithVerification(
+      email.toLowerCase(),
+    );
+    if (!user) throw new Error('USER_NOT_FOUND');
+    if (user.isVerified) throw new Error('ALREADY_VERIFIED');
+
+    const code = Math.floor(100000 + Math.random() * 900000).toString();
+    const expires = new Date(Date.now() + 15 * 60 * 1000);
+    await this.authRepo.updateVerificationCode(user.id, code, expires);
+    await this.emailService.sendVerificationCode(email.toLowerCase(), user.name, code);
   }
 
   async login(input: LoginInput): Promise<AuthResult> {
@@ -92,6 +144,8 @@ export class AuthUseCase {
 
     const passwordMatch = await bcrypt.compare(input.password, user.password);
     if (!passwordMatch) throw new Error('INVALID_CREDENTIALS');
+
+    if (!user.isVerified) throw new Error('EMAIL_NOT_VERIFIED');
 
     return { user: toPublicUser(user), userId: user.id };
   }
@@ -168,9 +222,17 @@ export class AuthUseCase {
       pinSize?: string;
       name?: string;
       nickname?: string;
+      mapPinsImageOnly?: boolean;
     },
   ): Promise<PublicUser> {
     const updated = await this.authRepo.updateUser(userId, data);
+    if (data.color !== undefined && this.locationsGateway) {
+      for (const groupId of updated.groupIds) {
+        this.locationsGateway.server
+          .to(`group:${groupId}`)
+          .emit('user:profile:updated', { userId, color: updated.color });
+      }
+    }
     return toPublicUser(updated);
   }
 
@@ -210,6 +272,7 @@ export class AuthUseCase {
           userId,
           avatar: avatarUrl,
         });
+        this.locationsGateway.invalidateAvatarCache(groupId);
       }
     }
 

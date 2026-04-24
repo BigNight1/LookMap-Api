@@ -24,6 +24,9 @@ export interface CreateUserDto {
   nickname: string;
   password: string;
   color: string;
+  isVerified: boolean;
+  verificationCode: string | null;
+  verificationCodeExpires: Date | null;
 }
 
 export interface CreateGoogleUserDto {
@@ -36,6 +39,7 @@ export interface CreateGoogleUserDto {
 }
 
 export interface IAuthRepository {
+  findByEmailWithVerification(email: string): Promise<UserEntity | null>;
   findByEmail(email: string): Promise<UserEntity | null>;
   findByNickname(nickname: string): Promise<UserEntity | null>;
   findByGoogleId(googleId: string): Promise<UserEntity | null>;
@@ -78,6 +82,13 @@ export interface IAuthRepository {
       name?: string;
       nickname?: string;
       avatar?: string;
+      mapPinsImageOnly?: boolean;
     },
   ): Promise<UserEntity>;
+  markAsVerified(userId: string): Promise<UserEntity>;
+  updateVerificationCode(
+    userId: string,
+    code: string,
+    expires: Date,
+  ): Promise<void>;
 }

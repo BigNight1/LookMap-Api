@@ -13,7 +13,9 @@ import {
   ForbiddenException,
   ServiceUnavailableException,
   UseGuards,
+  Logger,
 } from '@nestjs/common';
+import { SkipThrottle, Throttle } from '@nestjs/throttler';
 import { JwtService } from '@nestjs/jwt';
 import { AuthUseCase } from '../domain/auth.usecase';
 import {
@@ -23,33 +25,95 @@ import {
   UpdateProfileDto,
   UpdateAvatarDto,
   PutActiveRouteDto,
+  VerifyEmailDto,
+  ResendVerificationDto,
 } from './auth.dto';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 
 @Controller('auth')
 export class AuthController {
+  private readonly logger = new Logger(AuthController.name);
+
   constructor(
     private readonly authUseCase: AuthUseCase,
     private readonly jwtService: JwtService,
   ) {}
 
+  @Throttle({
+    short: { ttl: 60000, limit: 3 },
+    medium: { ttl: 60000, limit: 3 },
+    long: { ttl: 60000, limit: 3 },
+  })
   @Post('register')
   async register(@Body() dto: RegisterDto) {
+    this.logger.log(`[REGISTER] body recibido: ${JSON.stringify(dto)}`);
     try {
-      const { user, userId } = await this.authUseCase.register(dto);
-      const token = this.jwtService.sign({ sub: userId, email: user.email });
-      return { user, token };
+      return await this.authUseCase.register(dto);
     } catch (err: unknown) {
+      this.logger.error(
+        `[REGISTER] error: ${err instanceof Error ? err.message : JSON.stringify(err)}`,
+      );
       const message = err instanceof Error ? err.message : '';
       if (message === 'EMAIL_ALREADY_EXISTS')
         throw new ConflictException('Email already in use');
       if (message === 'NICKNAME_ALREADY_EXISTS')
         throw new ConflictException('Nickname already taken');
+      if (message === 'EMAIL_SEND_FAILED')
+        throw new ServiceUnavailableException('Could not send verification email');
       throw err;
     }
   }
 
+  @Post('verify-email')
+  @HttpCode(HttpStatus.OK)
+  async verifyEmail(@Body() dto: VerifyEmailDto) {
+    try {
+      const { user, userId } = await this.authUseCase.verifyEmail(
+        dto.email,
+        dto.code,
+      );
+      const token = this.jwtService.sign({ sub: userId, email: user.email });
+      return { user, token };
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : '';
+      if (message === 'USER_NOT_FOUND')
+        throw new UnauthorizedException('User not found');
+      if (message === 'ALREADY_VERIFIED')
+        throw new ConflictException('Email already verified');
+      if (message === 'INVALID_CODE')
+        throw new UnauthorizedException('Invalid verification code');
+      if (message === 'CODE_EXPIRED')
+        throw new UnauthorizedException(
+          'Code expired, request a new one',
+        );
+      throw err;
+    }
+  }
+
+  @Post('resend-verification')
+  @HttpCode(HttpStatus.OK)
+  async resendVerification(@Body() dto: ResendVerificationDto) {
+    try {
+      await this.authUseCase.resendVerificationCode(dto.email);
+      return { message: 'Code sent' };
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : '';
+      if (message === 'USER_NOT_FOUND')
+        throw new UnauthorizedException('User not found');
+      if (message === 'ALREADY_VERIFIED')
+        throw new ConflictException('Email already verified');
+      if (message === 'EMAIL_SEND_FAILED')
+        throw new ServiceUnavailableException('Could not send verification email');
+      throw err;
+    }
+  }
+
+  @Throttle({
+    short: { ttl: 60000, limit: 5 },
+    medium: { ttl: 60000, limit: 5 },
+    long: { ttl: 60000, limit: 5 },
+  })
   @Post('login')
   @HttpCode(HttpStatus.OK)
   async login(@Body() dto: LoginDto) {
@@ -61,6 +125,10 @@ export class AuthController {
       const message = err instanceof Error ? err.message : '';
       if (message === 'INVALID_CREDENTIALS')
         throw new UnauthorizedException('Invalid email or password');
+      if (message === 'EMAIL_NOT_VERIFIED')
+        throw new ForbiddenException(
+          'Please verify your email before logging in',
+        );
       throw err;
     }
   }
@@ -131,6 +199,7 @@ export class AuthController {
     }
   }
 
+  @SkipThrottle({ short: true, medium: true, long: true })
   @Get('me')
   @UseGuards(JwtAuthGuard)
   async me(@CurrentUser() user: { userId: string }) {

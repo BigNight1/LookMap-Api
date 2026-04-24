@@ -26,8 +26,11 @@ export class UserSchema {
   @Prop({ required: true, unique: true, trim: true })
   nickname: string;
 
-  /** Google OAuth subject; unique when set */
-  @Prop({ type: String, default: null, unique: true, sparse: true })
+  /**
+   * Google OAuth subject. Uniqueness is enforced via a partial index below so multiple
+   * email/password users (googleId null) do not collide on E11000.
+   */
+  @Prop({ type: String, default: null })
   googleId: string | null;
 
   /** Profile image URL from Google (or null) */
@@ -37,6 +40,18 @@ export class UserSchema {
   /** select: false → never returned by default; null for Google-only users */
   @Prop({ required: false, select: false, default: null, type: String })
   password: string | null;
+
+  /** true once email is verified (Google users are verified on create) */
+  @Prop({ type: Boolean, default: false })
+  isVerified: boolean;
+
+  /** 6-digit email verification code — null after verify or for Google-only */
+  @Prop({ type: String, default: null, select: false })
+  verificationCode: string | null;
+
+  /** Code expiry (15 min window when set) */
+  @Prop({ type: Date, default: null, select: false })
+  verificationCodeExpires: Date | null;
 
   /**
    * Color for this user's marker on the map.
@@ -53,11 +68,15 @@ export class UserSchema {
   @Prop({ default: 'normal' })
   pinSize: string;
 
+  /** Default true — mismo comportamiento actual (nombre visible en el pin). */
+  @Prop({ type: Boolean, default: true })
+  mapPinsImageOnly: boolean;
+
   /**
    * IDs of all groups the user belongs to.
    * Free plan: max 2. Empty array means not in any group.
    */
-  @Prop({ type: [Types.ObjectId], ref: 'Group', default: [] })
+  @Prop({ type: [Types.ObjectId], ref: 'Group', default: [], index: true })
   groupIds: Types.ObjectId[];
 
   @Prop({ default: false })
@@ -111,3 +130,14 @@ export class UserSchema {
 }
 
 export const UserSchemaDefinition = SchemaFactory.createForClass(UserSchema);
+
+// Unique only for real Google IDs — omit null/missing from the index (avoids duplicate null)
+UserSchemaDefinition.index(
+  { googleId: 1 },
+  {
+    unique: true,
+    partialFilterExpression: {
+      googleId: { $type: 'string', $ne: null },
+    },
+  },
+);

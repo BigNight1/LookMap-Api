@@ -21,6 +21,7 @@ interface RawUser {
   password?: string | null;
   color: string;
   pinSize?: string;
+  mapPinsImageOnly?: boolean;
   groupIds: Types.ObjectId[];
   isOnline: boolean;
   lastLocation: { lat: number; lng: number; timestamp: Date } | null;
@@ -37,6 +38,9 @@ interface RawUser {
     updatedAt: Date;
   }>;
   createdAt: Date;
+  isVerified?: boolean;
+  verificationCode?: string | null;
+  verificationCodeExpires?: Date | null;
 }
 
 @Injectable()
@@ -45,6 +49,14 @@ export class AuthRepository implements IAuthRepository {
     @InjectModel(UserSchema.name)
     private readonly userModel: Model<UserDocument>,
   ) {}
+
+  async findByEmailWithVerification(email: string): Promise<UserEntity | null> {
+    const doc = await this.userModel
+      .findOne({ email: email.toLowerCase() })
+      .select('+verificationCode +verificationCodeExpires')
+      .lean<RawUser>();
+    return doc ? this.toEntity(doc) : null;
+  }
 
   async findByEmail(email: string): Promise<UserEntity | null> {
     const doc = await this.userModel
@@ -92,6 +104,9 @@ export class AuthRepository implements IAuthRepository {
       color: data.color,
       googleId: data.googleId,
       avatar: data.avatar,
+      isVerified: true,
+      verificationCode: null,
+      verificationCodeExpires: null,
     });
     return this.toEntity(doc.toObject() as unknown as RawUser);
   }
@@ -107,6 +122,7 @@ export class AuthRepository implements IAuthRepository {
           $set: {
             googleId: data.googleId,
             avatar: data.avatar,
+            isVerified: true,
             ...(data.name != null ? { name: data.name } : {}),
           },
         },
@@ -236,6 +252,7 @@ export class AuthRepository implements IAuthRepository {
       name?: string;
       nickname?: string;
       avatar?: string;
+      mapPinsImageOnly?: boolean;
     },
   ): Promise<UserEntity> {
     const doc = await this.userModel
@@ -243,6 +260,34 @@ export class AuthRepository implements IAuthRepository {
       .lean<RawUser>();
     if (!doc) throw new Error('USER_NOT_FOUND');
     return this.toEntity(doc);
+  }
+
+  async markAsVerified(userId: string): Promise<UserEntity> {
+    const doc = await this.userModel
+      .findByIdAndUpdate(
+        userId,
+        {
+          $set: {
+            isVerified: true,
+            verificationCode: null,
+            verificationCodeExpires: null,
+          },
+        },
+        { returnDocument: 'after' },
+      )
+      .lean<RawUser>();
+    if (!doc) throw new Error('USER_NOT_FOUND');
+    return this.toEntity(doc);
+  }
+
+  async updateVerificationCode(
+    userId: string,
+    code: string,
+    expires: Date,
+  ): Promise<void> {
+    await this.userModel.findByIdAndUpdate(userId, {
+      $set: { verificationCode: code, verificationCodeExpires: expires },
+    });
   }
 
   private toEntity(doc: RawUser): UserEntity {
@@ -260,6 +305,9 @@ export class AuthRepository implements IAuthRepository {
       }),
     );
 
+    const hasGoogleId = Boolean(doc.googleId);
+    const isVerified = hasGoogleId || (doc.isVerified ?? true);
+
     return {
       id: String(doc._id),
       name: doc.name,
@@ -270,6 +318,10 @@ export class AuthRepository implements IAuthRepository {
       password: doc.password ?? null,
       color: doc.color,
       pinSize: doc.pinSize ?? 'normal',
+      mapPinsImageOnly: doc.mapPinsImageOnly ?? true,
+      isVerified,
+      verificationCode: doc.verificationCode ?? null,
+      verificationCodeExpires: doc.verificationCodeExpires ?? null,
       groupIds: (doc.groupIds ?? []).map(String),
       isOnline: doc.isOnline ?? false,
       lastLocation: doc.lastLocation ?? null,
