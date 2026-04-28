@@ -175,6 +175,8 @@ export class AuthController {
       const message = err instanceof Error ? err.message : '';
       if (message === 'USER_NOT_FOUND')
         throw new UnauthorizedException('User not found');
+      if (message === 'NICKNAME_ALREADY_EXISTS')
+        throw new ConflictException('Nickname already taken');
       throw err;
     }
   }

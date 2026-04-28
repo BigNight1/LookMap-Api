@@ -23,6 +23,8 @@ interface RawUser {
   pinSize?: string;
   mapPinsImageOnly?: boolean;
   groupIds: Types.ObjectId[];
+  maxGroups?: number;
+  extraGroupsPurchased?: number;
   isOnline: boolean;
   lastLocation: { lat: number; lng: number; timestamp: Date } | null;
   lastBattery: number | null;
@@ -255,11 +257,18 @@ export class AuthRepository implements IAuthRepository {
       mapPinsImageOnly?: boolean;
     },
   ): Promise<UserEntity> {
-    const doc = await this.userModel
-      .findByIdAndUpdate(userId, { $set: data }, { returnDocument: 'after' })
-      .lean<RawUser>();
-    if (!doc) throw new Error('USER_NOT_FOUND');
-    return this.toEntity(doc);
+    try {
+      const doc = await this.userModel
+        .findByIdAndUpdate(userId, { $set: data }, { returnDocument: 'after' })
+        .lean<RawUser>();
+      if (!doc) throw new Error('USER_NOT_FOUND');
+      return this.toEntity(doc);
+    } catch (err: any) {
+      if (err.code === 11000 && err.keyPattern?.nickname) {
+        throw new Error('NICKNAME_ALREADY_EXISTS');
+      }
+      throw err;
+    }
   }
 
   async markAsVerified(userId: string): Promise<UserEntity> {
@@ -323,6 +332,8 @@ export class AuthRepository implements IAuthRepository {
       verificationCode: doc.verificationCode ?? null,
       verificationCodeExpires: doc.verificationCodeExpires ?? null,
       groupIds: (doc.groupIds ?? []).map(String),
+      maxGroups: doc.maxGroups ?? 2,
+      extraGroupsPurchased: doc.extraGroupsPurchased ?? 0,
       isOnline: doc.isOnline ?? false,
       lastLocation: doc.lastLocation ?? null,
       lastBattery: doc.lastBattery ?? null,

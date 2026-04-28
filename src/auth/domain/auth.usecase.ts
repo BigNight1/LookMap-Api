@@ -226,11 +226,16 @@ export class AuthUseCase {
     },
   ): Promise<PublicUser> {
     const updated = await this.authRepo.updateUser(userId, data);
-    if (data.color !== undefined && this.locationsGateway) {
+    if (this.locationsGateway) {
       for (const groupId of updated.groupIds) {
         this.locationsGateway.server
           .to(`group:${groupId}`)
-          .emit('user:profile:updated', { userId, color: updated.color });
+          .emit('user:profile:updated', { 
+            userId, 
+            color: updated.color,
+            name: updated.name,
+            nickname: updated.nickname
+          });
       }
     }
     return toPublicUser(updated);

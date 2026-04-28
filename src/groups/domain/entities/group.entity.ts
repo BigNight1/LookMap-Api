@@ -11,6 +11,8 @@ export interface GroupMember {
   avatar?: string | null;
   /** Real-time presence snapshot for `/groups/mine` hydration. */
   isOnline?: boolean;
+  /** Current battery level when online; null when offline or unknown. */
+  battery?: number | null;
   /** Current location when online; null when offline or unknown. */
   location?: { latitude: number; longitude: number; timestamp: string } | null;
   /** Last persisted known location (used to render offline members). */
@@ -28,6 +30,10 @@ export interface GroupEntity {
   members: GroupMember[];
   /** Max members allowed. Default 3 (free plan). Pro plan will raise this later. */
   maxMembers: number;
+  plan: 'free' | 'basic' | 'pro' | 'vip';
+  subscriptionStatus: 'active' | 'cancelled' | 'expired' | null;
+  subscriptionExpiresAt: Date | null;
+  subscribedBy: string | null;
   createdAt: Date;
   isActive: boolean;
 }

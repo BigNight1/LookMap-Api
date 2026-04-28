@@ -27,7 +27,6 @@ import {
   TransferOwnerDto,
 } from './groups.dto';
 
-const FREE_PLAN_GROUP_LIMIT = 2;
 
 interface AuthenticatedUser {
   userId: string;
@@ -68,8 +67,9 @@ export class GroupsController {
   ) {
     const currentUser = await this.authRepo.findById(user.userId);
     if (!currentUser) throw new NotFoundException('User not found');
-    if (currentUser.groupIds.length >= FREE_PLAN_GROUP_LIMIT) {
-      throw new BadRequestException('Límite de grupos del plan free alcanzado');
+    const groupLimit = currentUser.maxGroups + currentUser.extraGroupsPurchased;
+    if (currentUser.groupIds.length >= groupLimit) {
+      throw new BadRequestException('Límite de grupos alcanzado');
     }
 
     try {
@@ -99,8 +99,9 @@ export class GroupsController {
   ) {
     const currentUser = await this.authRepo.findById(user.userId);
     if (!currentUser) throw new NotFoundException('User not found');
-    if (currentUser.groupIds.length >= FREE_PLAN_GROUP_LIMIT) {
-      throw new BadRequestException('Límite de grupos del plan free alcanzado');
+    const groupLimit = currentUser.maxGroups + currentUser.extraGroupsPurchased;
+    if (currentUser.groupIds.length >= groupLimit) {
+      throw new BadRequestException('Límite de grupos alcanzado');
     }
 
     try {
@@ -123,12 +124,14 @@ export class GroupsController {
             color: currentUser.color,
             avatar: currentUser.avatar ?? null,
             isOnline: true,
-            battery: null,
+            battery: dto.battery ?? currentUser.lastBattery ?? null,
             location: null,
           },
         });
 
-      return { data: group, message: 'Te uniste al grupo' };
+      const [groupWithPresence] = await this.groupRepo.findManyById([group.id]);
+
+      return { data: groupWithPresence ?? group, message: 'Te uniste al grupo' };
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : '';
       if (msg === 'GROUP_NOT_FOUND')

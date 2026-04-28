@@ -46,6 +46,8 @@ export interface UserEntity {
    * Free plan: max 2. Empty array means not in any group.
    */
   groupIds: string[];
+  maxGroups: number;
+  extraGroupsPurchased: number;
   isOnline: boolean;
   lastLocation: { lat: number; lng: number; timestamp: Date } | null;
   /** Battery level (0–100) at last disconnect */

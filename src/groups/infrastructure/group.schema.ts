@@ -38,6 +38,18 @@ export class GroupSchema {
   @Prop({ default: 3 })
   maxMembers: number;
 
+  @Prop({ type: String, enum: ['free', 'basic', 'pro', 'vip'], default: 'free' })
+  plan: 'free' | 'basic' | 'pro' | 'vip';
+
+  @Prop({ type: String, enum: ['active', 'cancelled', 'expired'], default: null })
+  subscriptionStatus: 'active' | 'cancelled' | 'expired' | null;
+
+  @Prop({ type: Date, default: null })
+  subscriptionExpiresAt: Date | null;
+
+  @Prop({ type: String, default: null })
+  subscribedBy: string | null;
+
   @Prop({ default: true })
   isActive: boolean;
 }

@@ -24,15 +24,22 @@ interface RawGroup {
   ownerId: string;
   members: RawMember[];
   maxMembers: number;
+  plan?: 'free' | 'basic' | 'pro' | 'vip';
+  subscriptionStatus?: 'active' | 'cancelled' | 'expired' | null;
+  subscriptionExpiresAt?: Date | null;
+  subscribedBy?: string | null;
   isActive: boolean;
   createdAt: Date;
 }
 
 interface RawUserProfile {
   _id: Types.ObjectId;
+  name?: string;
+  nickname?: string;
   avatar?: string | null;
   isOnline?: boolean;
   lastLocation?: { lat: number; lng: number; timestamp: Date } | null;
+  lastBattery?: number | null;
 }
 
 interface RawLocation {
@@ -40,6 +47,7 @@ interface RawLocation {
   groupId: string;
   lat: number;
   lng: number;
+  battery: number;
   isOnline: boolean;
   timestamp: Date;
 }
@@ -86,7 +94,7 @@ export class GroupRepository implements IGroupRepository {
     if (allUserIds.length > 0) {
       const users = await this.userModel.find(
         { _id: { $in: allUserIds } },
-        { avatar: 1, isOnline: 1, lastLocation: 1 },
+        { avatar: 1, isOnline: 1, lastLocation: 1, lastBattery: 1, name: 1, nickname: 1 },
       ).lean<RawUserProfile[]>();
       userProfileMap = new Map(users.map((u) => [String(u._id), u]));
     }
@@ -96,7 +104,7 @@ export class GroupRepository implements IGroupRepository {
       const groupIds = docs.map((d) => String(d._id));
       const locations = await this.locationModel.find(
         { groupId: { $in: groupIds }, userId: { $in: allUserIds } },
-        { userId: 1, groupId: 1, lat: 1, lng: 1, isOnline: 1, timestamp: 1 },
+        { userId: 1, groupId: 1, lat: 1, lng: 1, battery: 1, isOnline: 1, timestamp: 1 },
       ).lean<RawLocation[]>();
       locationByGroupAndUser = new Map(
         locations.map((loc) => [`${loc.groupId}:${loc.userId}`, loc]),
@@ -211,6 +219,10 @@ export class GroupRepository implements IGroupRepository {
       code: doc.code,
       ownerId: doc.ownerId,
       maxMembers: doc.maxMembers ?? 3,
+      plan: doc.plan ?? 'free',
+      subscriptionStatus: doc.subscriptionStatus ?? null,
+      subscriptionExpiresAt: doc.subscriptionExpiresAt ?? null,
+      subscribedBy: doc.subscribedBy ?? null,
       isActive: doc.isActive,
       createdAt: doc.createdAt,
       members: doc.members.map((m) => ({
@@ -244,13 +256,21 @@ export class GroupRepository implements IGroupRepository {
 
     return {
       ...this.toEntity(doc),
-      members: doc.members.map((m) => ({
-        ...m,
-        avatar: userProfileMap.get(m.userId)?.avatar ?? null,
+      members: doc.members.map((m) => {
+        const profile = userProfileMap.get(m.userId);
+        const displayNickname = profile?.nickname?.trim() ? profile.nickname.trim() : (profile?.name ?? m.nickname);
+        return {
+          ...m,
+          nickname: displayNickname,
+          avatar: profile?.avatar ?? null,
         isOnline:
           locationByGroupAndUser.get(`${String(doc._id)}:${m.userId}`)?.isOnline ??
           userProfileMap.get(m.userId)?.isOnline ??
           false,
+        battery:
+          locationByGroupAndUser.get(`${String(doc._id)}:${m.userId}`)?.battery ??
+          userProfileMap.get(m.userId)?.lastBattery ??
+          null,
         location: (() => {
           const loc = locationByGroupAndUser.get(`${String(doc._id)}:${m.userId}`);
           const online = loc?.isOnline ?? userProfileMap.get(m.userId)?.isOnline ?? false;
@@ -269,7 +289,8 @@ export class GroupRepository implements IGroupRepository {
                 toPoint(userProfileMap.get(m.userId)?.lastLocation) ??
                 toPoint(locationByGroupAndUser.get(`${String(doc._id)}:${m.userId}`) ?? null)
               )?.timestamp ?? null,
-      })),
+        };
+      }),
     };
   }
 }

@@ -79,6 +79,12 @@ export class UserSchema {
   @Prop({ type: [Types.ObjectId], ref: 'Group', default: [], index: true })
   groupIds: Types.ObjectId[];
 
+  @Prop({ type: Number, default: 2 })
+  maxGroups: number;
+
+  @Prop({ type: Number, default: 0 })
+  extraGroupsPurchased: number;
+
   @Prop({ default: false })
   isOnline: boolean;
 
